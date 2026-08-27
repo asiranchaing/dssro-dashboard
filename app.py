@@ -12,6 +12,9 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import datetime
 
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
 # ------------------------------------------------------------------------------
 # Page config
 # ------------------------------------------------------------------------------
@@ -109,6 +112,14 @@ with st.sidebar.expander("Adjust plot ranges"):
     ylim_wtcn = st.slider("WTCn (m/s-kPa) x1e-8", 0.0, 5.0, (0.0, 1.2))
     ylim_stcn = st.slider("STCn (m/s) x1e-7", 0.0, 10.0, (0.0, 2.5))
     ylim_aspn = st.slider("ASPn (%)", 0.0, 20.0, (0.0, 5.0))
+
+st.sidebar.header("5️⃣ Regression Settings")
+regression_type = st.sidebar.selectbox(
+    "Trendline type", ["None", "Linear", "Polynomial"]
+)
+poly_degree = 2
+if regression_type == "Polynomial":
+    poly_degree = st.sidebar.slider("Polynomial degree", 2, 6, 2)
 
 if uploaded_file is None:
     st.info("👈 Upload an Excel file in the sidebar to begin.")
@@ -337,88 +348,131 @@ st.download_button(
 )
 
 # ==============================================================================
-# STEP 5 — PLOTS
+# STEP 5 — INTERACTIVE PLOTS WITH REGRESSION
 # ==============================================================================
 st.header("Step 5 — Diagnostic Plots")
 
 
-def plot_normalized_data(data_df, fil_df, norm_col, norm_label, title, norm_ylim):
-    fig, ax1 = plt.subplots(figsize=(11, 5.5))
+def compute_regression(x_numeric, y, degree):
+    """Fits a polynomial regression (degree=1 is linear) and returns fitted
+    values, equation string, and R²."""
+    mask = ~(np.isnan(x_numeric) | np.isnan(y))
+    x_clean = x_numeric[mask]
+    y_clean = y[mask]
 
-    ax1.scatter(data_df['Date'], data_df[norm_col], marker='D', label=norm_label, color='darkblue')
-    ax1.set_xlabel('Date')
-    ax1.set_ylabel(norm_label)
-    ax1.set_title(title)
-    ax1.set_ylim(norm_ylim)
-    ax1.grid()
+    if len(x_clean) < degree + 1:
+        return None, None, None
 
-    min_date, max_date = data_df['Date'].min(), data_df['Date'].max()
-    time_span = max_date - min_date
+    coeffs = np.polyfit(x_clean, y_clean, degree)
+    poly = np.poly1d(coeffs)
+    y_fit = poly(x_numeric)
 
-    if time_span < datetime.timedelta(days=90):
-        locator = mdates.DayLocator(interval=7)
-        formatter = mdates.DateFormatter('%Y-%m-%d')
-    elif time_span < datetime.timedelta(days=365 * 2):
-        locator = mdates.MonthLocator(interval=1)
-        formatter = mdates.DateFormatter('%Y-%m')
-    elif time_span < datetime.timedelta(days=365 * 5):
-        locator = mdates.MonthLocator(interval=6)
-        formatter = mdates.DateFormatter('%Y-%m')
-    else:
-        locator = mdates.YearLocator(interval=1)
-        formatter = mdates.DateFormatter('%Y')
+    y_pred_clean = poly(x_clean)
+    ss_res = np.sum((y_clean - y_pred_clean) ** 2)
+    ss_tot = np.sum((y_clean - np.mean(y_clean)) ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot != 0 else float('nan')
 
-    ax1.xaxis.set_major_locator(locator)
-    ax1.xaxis.set_major_formatter(formatter)
-    ax1.tick_params(axis='x', rotation=45)
-    ax1.minorticks_on()
+    n = len(coeffs)
+    terms = []
+    for i, c in enumerate(coeffs):
+        power = n - i - 1
+        if power == 0:
+            terms.append(f"{c:.4g}")
+        elif power == 1:
+            terms.append(f"{c:.4g}x")
+        else:
+            terms.append(f"{c:.4g}x^{power}")
+    equation = "y = " + " + ".join(terms)
 
-    ax2 = ax1.twinx()
-    ax2.scatter(fil_df['Date'], fil_df['Rsp (%)'], color='red', marker='s', label='Rsp (%)')
-    ax2.set_ylabel('R_sp (%)')
-    ax2.set_ylim(0, 100)
-    ax2.minorticks_on()
-
-    lines, labels = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax2.legend(lines + lines2, labels + labels2, loc='upper left')
-
-    fig.tight_layout()
-    return fig
+    return y_fit, equation, r2
 
 
-def show_plot_with_download(fig, filename):
-    st.pyplot(fig)
-    buf = BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight")
-    st.download_button(
-        f"⬇️ Download '{filename}'",
-        data=buf.getvalue(),
-        file_name=filename,
-        mime="image/png",
+def plot_normalized_data_interactive(
+    data_df, fil_df, norm_col, norm_label, title, norm_ylim,
+    regression_type, poly_degree
+):
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # --- Metric scatter (left axis) ---
+    fig.add_trace(
+        go.Scatter(
+            x=data_df['Date'], y=data_df[norm_col],
+            mode='markers', name=norm_label,
+            marker=dict(color='darkblue', symbol='diamond', size=7),
+        ),
+        secondary_y=False,
     )
-    plt.close(fig)
+
+    # --- Regression trendline ---
+    if regression_type != "None":
+        x_numeric = (data_df['Date'] - data_df['Date'].min()).dt.total_seconds().values
+        y = data_df[norm_col].values.astype(float)
+        degree = 1 if regression_type == "Linear" else poly_degree
+
+        y_fit, equation, r2 = compute_regression(x_numeric, y, degree)
+
+        if y_fit is not None:
+            order = np.argsort(x_numeric)
+            fig.add_trace(
+                go.Scatter(
+                    x=data_df['Date'].values[order], y=y_fit[order],
+                    mode='lines',
+                    name=f'{regression_type} fit (R²={r2:.3f})',
+                    line=dict(color='orange', width=3, dash='dash'),
+                ),
+                secondary_y=False,
+            )
+            fig.add_annotation(
+                text=f"{equation}<br>R² = {r2:.4f}",
+                xref="paper", yref="paper",
+                x=0.01, y=0.99, showarrow=False,
+                bgcolor="rgba(255,255,255,0.75)",
+                bordercolor="orange", borderwidth=1,
+                align="left",
+            )
+
+    # --- Rsp scatter (right axis) ---
+    fig.add_trace(
+        go.Scatter(
+            x=fil_df['Date'], y=fil_df['Rsp (%)'],
+            mode='markers', name='Rsp (%)',
+            marker=dict(color='red', symbol='square', size=6),
+        ),
+        secondary_y=True,
+    )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title='Date',
+        hovermode='x unified',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        height=550,
+    )
+    fig.update_yaxes(title_text=norm_label, range=list(norm_ylim), secondary_y=False)
+    fig.update_yaxes(title_text='R_sp (%)', range=[0, 100], secondary_y=True)
+
+    return fig
 
 
 plots_config = [
     (norm_df, 'SSPn (%)', 'SSPn (%)',
      'Normalized % Salt Passage (SSPn) vs Recovery Setpoint',
-     'SSPn_and_R_sp_Over_Time.png', ylim_sspn),
+     'SSPn_and_R_sp_Over_Time.html', ylim_sspn),
     (norm_df, 'QSPn (gpm)', 'Permeate Flow Rate (gpm)',
      'Permeate Flow Rate (QSPn) vs Recovery Setpoint',
-     'QSPn_and_R_sp_Over_Time.png', ylim_qspn),
+     'QSPn_and_R_sp_Over_Time.html', ylim_qspn),
     (norm_df, 'DPn (psi)', 'DPn (psi)',
      'Normalized Differential Pressure (DPn) vs Recovery Setpoint',
-     'DPn_and_R_sp_Over_Time.png', ylim_dpn),
+     'DPn_and_R_sp_Over_Time.html', ylim_dpn),
     (norm_df, 'WTCn (m/s-kPa)', 'WTCn (m/s-kPa)',
      'Water Transport Coefficient (WTCn) vs Recovery Setpoint',
-     'WTCn_and_R_sp_Over_Time.png', tuple(v * 1e-8 for v in ylim_wtcn)),
+     'WTCn_and_R_sp_Over_Time.html', tuple(v * 1e-8 for v in ylim_wtcn)),
     (norm_df, 'STCn (m/s)', 'STCn (m/s)',
      'Salt Transport Coefficient (STCn) vs Recovery Setpoint',
-     'STCn_and_R_sp_Over_Time.png', tuple(v * 1e-7 for v in ylim_stcn)),
+     'STCn_and_R_sp_Over_Time.html', tuple(v * 1e-7 for v in ylim_stcn)),
     (calc_df, 'ASPn (%)', 'ASPn (%)',
      '% Salt Passage (ASPn) vs Recovery Setpoint',
-     'ASPn_and_R_sp_Over_Time.png', ylim_aspn),
+     'ASPn_and_R_sp_Over_Time.html', ylim_aspn),
 ]
 
 tab_labels = ["SSPn", "QSPn", "DPn", "WTCn", "STCn", "ASPn"]
@@ -426,7 +480,18 @@ tabs = st.tabs(tab_labels)
 
 for tab, (df_source, col, label, title, fname, ylim) in zip(tabs, plots_config):
     with tab:
-        fig = plot_normalized_data(df_source, fil_df, col, label, title, ylim)
-        show_plot_with_download(fig, fname)
+        fig = plot_normalized_data_interactive(
+            df_source, fil_df, col, label, title, ylim,
+            regression_type, poly_degree
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        html_bytes = fig.to_html(include_plotlyjs='cdn').encode()
+        st.download_button(
+            f"⬇️ Download interactive chart ('{fname}')",
+            data=html_bytes,
+            file_name=fname,
+            mime='text/html',
+        )
 
 st.success("✅ Analysis complete. Adjust settings in the sidebar and the dashboard updates automatically.")
