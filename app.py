@@ -15,9 +15,13 @@ import datetime
 # ------------------------------------------------------------------------------
 # Page config
 # ------------------------------------------------------------------------------
+from PIL import Image
+
+icon = Image.open("logo.png")
+
 st.set_page_config(
     page_title="DSSRO Membrane Performance Dashboard",
-    page_icon="🔬",
+    page_icon="icon",
     layout="wide",
 )
 
