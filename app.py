@@ -17,7 +17,7 @@ import datetime
 # ------------------------------------------------------------------------------
 from PIL import Image
 
-icon = Image.open("logo.png")
+icon = Image.open("veolia.png")
 
 st.set_page_config(
     page_title="DSSRO Membrane Performance Dashboard",
